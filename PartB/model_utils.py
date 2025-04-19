@@ -36,20 +36,40 @@ def prepare_data_loaders(batch_size, use_augmentation):
     all_indices = np.arange(len(labels))
     training_idx, validation_idx = [], []
     
-    for class_label in np.unique(labels):
-        class_specific_indices = all_indices[labels == class_label]
-        np.random.shuffle(class_specific_indices)
-        split_point = int(len(class_specific_indices) * (1 - validation_percentage))
-        training_idx.extend(class_specific_indices[:split_point])
-        validation_idx.extend(class_specific_indices[split_point:])
+    # Distribute indices for stratified sampling
+    for label_value in np.unique(labels):
+        indices_for_class = all_indices[labels == label_value]
+        # Shuffle the indices for this class
+        np.random.seed(42)  # Add deterministic behavior
+        np.random.shuffle(indices_for_class)
+        # Calculate partition point 
+        partition_idx = int((1 - validation_percentage) * len(indices_for_class))
+        # Assign indices to respective sets
+        training_idx += indices_for_class[:partition_idx].tolist()
+        validation_idx += indices_for_class[partition_idx:].tolist()
 
-    train_subset = Subset(complete_dataset, training_idx)
-    val_subset = Subset(complete_dataset, validation_idx)
+    # Create dataset subsets using partitioned indices
+    train_partition = Subset(complete_dataset, sorted(training_idx))
+    validation_partition = Subset(complete_dataset, sorted(validation_idx))
 
-    train_data_loader = DataLoader(train_subset, batch_size=batch_size, shuffle=True, num_workers=2)
-    val_data_loader = DataLoader(val_subset, batch_size=batch_size, shuffle=False, num_workers=2)
-    
-    return train_data_loader, val_data_loader
+    # Configure data loaders with appropriate settings
+    train_loader = DataLoader(
+        dataset=train_partition, 
+        batch_size=batch_size, 
+        shuffle=True, 
+        num_workers=2,
+        pin_memory=True  # Added performance enhancement
+    )
+    validation_loader = DataLoader(
+        dataset=validation_partition, 
+        batch_size=batch_size, 
+        shuffle=False, 
+        num_workers=2,
+        pin_memory=True  # Added performance enhancement
+    )
+
+    # Return configured data loaders
+    return train_loader, validation_loader
 
 def construct_inception_model(fc_neurons, dropout_rate, unfreeze_count):
     """Construct and customize InceptionV3 model."""
