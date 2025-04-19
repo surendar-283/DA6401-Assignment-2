@@ -9,151 +9,159 @@ from tqdm import tqdm
 import os
 from model_builder import construct_vision_network
 
-def create_transform_pipelines(use_augmentation=False):
-    """Create image transformation pipelines for training and testing."""
-    standard_transforms = [
+def generate_transformation_pipelines(apply_augmentation=False):
+    """Generate image transformation pipelines for training and testing."""
+    base_transforms = [
         transforms.Resize((224, 224)),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     ]
 
-    if use_augmentation:
-        training_pipeline = transforms.Compose([
+    if apply_augmentation:
+        train_pipeline = transforms.Compose([
             transforms.RandomResizedCrop(224),
             transforms.RandomHorizontalFlip(),
-            *standard_transforms
+            *base_transforms
         ])
     else:
-        training_pipeline = transforms.Compose(standard_transforms)
+        train_pipeline = transforms.Compose(base_transforms)
 
-    testing_pipeline = transforms.Compose(standard_transforms)
+    test_pipeline = transforms.Compose(base_transforms)
 
-    return training_pipeline, testing_pipeline
+    return train_pipeline, test_pipeline
 
-def prepare_and_split_datasets(dataset_path, training_transforms, testing_transforms, validation_portion=0.2):
-    """Load and split datasets into train, validation, and test sets."""
-    # Load datasets
-    training_dataset = ImageFolder(os.path.join(dataset_path, 'train'), transform=training_transforms)
-    testing_dataset = ImageFolder(os.path.join(dataset_path, 'val'), transform=testing_transforms)
+def load_and_partition_data(data_directory, train_transform, test_transform, val_split=0.2):
+    """Load and partition dataset into train, validation, and test sets."""
+    # Load the datasets
+    train_dataset = ImageFolder(os.path.join(data_directory, 'train'), transform=train_transform)
+    test_dataset = ImageFolder(os.path.join(data_directory, 'val'), transform=test_transform)
 
-    # Split training into training and validation
-    validation_size = int(validation_portion * len(training_dataset))
-    adjusted_training_size = len(training_dataset) - validation_size
-    training_subset, validation_subset = random_split(training_dataset, [adjusted_training_size, validation_size])
+    # Partition training data to include validation
+    val_count = int(val_split * len(train_dataset))
+    train_count = len(train_dataset) - val_count
+    train_subset, val_subset = random_split(train_dataset, [train_count, val_count])
 
-    return training_subset, validation_subset, testing_dataset, training_dataset.classes
+    return train_subset, val_subset, test_dataset, train_dataset.classes
 
-def setup_data_loaders(training_data, validation_data, testing_data, batch_size=32):
-    """Set up data loaders for training, validation, and testing."""
-    training_loader = DataLoader(
-        training_data,
+def create_data_loaders(train_data, val_data, test_data, batch_size=32):
+    """Create data loaders for training, validation, and testing."""
+    train_loader = DataLoader(
+        train_data,
         batch_size=batch_size,
         shuffle=True,
         num_workers=4,
         pin_memory=True
     )
 
-    validation_loader = DataLoader(
-        validation_data,
+    val_loader = DataLoader(
+        val_data,
         batch_size=batch_size,
         shuffle=False,
         num_workers=4,
         pin_memory=True
     )
 
-    testing_loader = DataLoader(
-        testing_data,
+    test_loader = DataLoader(
+        test_data,
         batch_size=batch_size,
         shuffle=False,
         num_workers=4,
         pin_memory=True
     )
 
-    return training_loader, validation_loader, testing_loader
+    return train_loader, val_loader, test_loader
 
-def initialize_datasets(dataset_path, batch_size=32, validation_portion=0.2, use_augmentation=False):
-    """Initialize and prepare datasets and loaders."""
-    # Create transform pipelines
-    training_transforms, testing_transforms = create_transform_pipelines(use_augmentation)
+def setup_datasets(data_directory, batch_size=32, val_split=0.2, apply_augmentation=False):
+    """Setup and prepare datasets and loaders."""
+    # Generate transform pipelines
+    train_transform, test_transform = generate_transformation_pipelines(apply_augmentation)
 
-    # Load and split datasets
-    training_data, validation_data, testing_data, class_names = prepare_and_split_datasets(
-        dataset_path, training_transforms, testing_transforms, validation_portion
+    # Load and partition datasets
+    train_data, val_data, test_data, class_list = load_and_partition_data(
+        data_directory, train_transform, test_transform, val_split
     )
 
-    # Set up data loaders
-    training_loader, validation_loader, testing_loader = setup_data_loaders(
-        training_data, validation_data, testing_data, batch_size
+    # Create data loaders
+    train_loader, val_loader, test_loader = create_data_loaders(
+        train_data, val_data, test_data, batch_size
     )
 
-    return training_loader, validation_loader, testing_loader, class_names
+    return train_loader, val_loader, test_loader, class_list
 
-def assess_model_performance(network, data_loader, criterion, device):
-    """Assess model performance on the given data loader."""
-    network.eval()
-    cumulative_loss = 0.0
-    correct_predictions = 0
-    total_samples = 0
+def evaluate_model(model, data_loader, loss_fn, device):
+    """Evaluate model performance on the given data loader."""
+    # Set model to evaluation mode
+    model.eval()
+    total_loss = 0.0
+    correct_count = 0
+    total_count = 0
 
+    # Disable gradient calculation for evaluation
     with torch.no_grad():
-        for inputs, labels in data_loader:
-            inputs, labels = inputs.to(device), labels.to(device)
+        for data, target in data_loader:
+            # Transfer data to appropriate device
+            data, target = data.to(device), target.to(device)
 
-            # Forward pass
-            outputs = network(inputs)
-            loss = criterion(outputs, labels)
+            # Compute model output
+            output = model(data)
+            
+            # Compute batch loss
+            batch_loss = loss_fn(output, target)
+            total_loss += batch_loss.item()
+            
+            # Determine predictions and calculate accuracy
+            predictions = torch.argmax(output, dim=1)
+            total_count += target.shape[0]
+            correct_count += (predictions == target).sum().item()
 
-            # Calculate metrics
-            cumulative_loss += loss.item()
-            _, predicted = outputs.max(1)
-            total_samples += labels.size(0)
-            correct_predictions += predicted.eq(labels).sum().item()
+    # Compute final metrics
+    mean_loss = total_loss / len(data_loader)
+    accuracy_pct = (correct_count / total_count) * 100
 
-    # Calculate average loss and accuracy
-    avg_loss = cumulative_loss / len(data_loader)
-    accuracy = 100.0 * correct_predictions / total_samples
+    return mean_loss, accuracy_pct
 
-    return avg_loss, accuracy
+def run_training_epoch(model, data_loader, optimizer, loss_fn, device):
+    """Run one training epoch."""
+    # Set model to training mode
+    model.train()
+    total_loss = 0.0
+    correct_count = 0
+    total_count = 0
 
-def execute_training_epoch(network, train_loader, optimizer, criterion, device):
-    """Execute one training epoch."""
-    network.train()
-    cumulative_loss = 0.0
-    correct_predictions = 0
-    total_samples = 0
+    # Iterate through batches with progress visualization
+    with tqdm(data_loader, unit="batch") as progress_bar:
+        for data, target in progress_bar:
+            # Move batch to device
+            data, target = data.to(device), target.to(device)
 
-    with tqdm(train_loader, unit="batch") as progress_bar:
-        for inputs, labels in progress_bar:
-            inputs, labels = inputs.to(device), labels.to(device)
-
-            # Reset gradients
+            # Clear accumulated gradients
             optimizer.zero_grad()
-
-            # Forward pass
-            outputs = network(inputs)
-            loss = criterion(outputs, labels)
-
-            # Backward pass and optimization
-            loss.backward()
+            
+            # Forward computation
+            output = model(data)
+            batch_loss = loss_fn(output, target)
+            
+            # Backward computation and parameter update
+            batch_loss.backward()
             optimizer.step()
-
-            # Calculate metrics
-            cumulative_loss += loss.item()
-            _, predicted = outputs.max(1)
-            total_samples += labels.size(0)
-            correct_predictions += predicted.eq(labels).sum().item()
-
-            # Update progress display
+            
+            # Track statistics
+            total_loss += batch_loss.item()
+            predictions = torch.argmax(output, dim=1)
+            total_count += target.shape[0]
+            correct_count += (predictions == target).sum().item()
+            
+            # Update progress information
             progress_bar.set_postfix({
-                'loss': f'{loss.item():.4f}',
-                'acc': f'{100.0 * correct_predictions / total_samples:.1f}%'
+                'loss': f'{batch_loss.item():.4f}',
+                'acc': f'{100.0 * correct_count / total_count:.1f}%'
             })
 
-    # Calculate average loss and accuracy
-    avg_loss = cumulative_loss / len(train_loader)
-    accuracy = 100.0 * correct_predictions / total_samples
+    # Calculate final epoch metrics
+    mean_loss = total_loss / len(data_loader)
+    accuracy_pct = (correct_count / total_count) * 100
 
-    return avg_loss, accuracy
+    return mean_loss, accuracy_pct
 
 def execute_training_workflow(config=None):
     """Execute training and validation workflow with the given configuration."""
@@ -166,15 +174,15 @@ def execute_training_workflow(config=None):
                    f"lr_{config.learning_rate:.0e}_"
                    f"bs_{config.batch_size}")
 
-        # Initialize datasets
-        training_loader, validation_loader, _, class_names = initialize_datasets(
-            dataset_path='/kaggle/input/nature-12k/inaturalist_12K',
+        # Setup datasets
+        train_loader, val_loader, _, class_names = setup_datasets(
+            data_directory='/kaggle/input/nature-12k/inaturalist_12K',
             batch_size=config.batch_size,
-            use_augmentation=config.data_augmentation
+            apply_augmentation=config.data_augmentation
         )
 
         # Construct network
-        network = construct_vision_network(
+        model = construct_vision_network(
             {
                 'conv_filters': config.conv_filters,
                 'kernel_sizes': config.kernel_sizes,
@@ -188,26 +196,26 @@ def execute_training_workflow(config=None):
 
         # Configure device
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        network = network.to(device)
+        model = model.to(device)
 
         # Initialize optimizer and loss function
         optimizer = optim.Adam(
-            network.parameters(),
+            model.parameters(),
             lr=config.learning_rate,
             weight_decay=config.weight_decay
         )
-        criterion = nn.CrossEntropyLoss()
+        loss_fn = nn.CrossEntropyLoss()
 
         # Training loop
         for epoch in range(1, 21):  # Fixed 20 epochs
             # Train for one epoch
-            train_loss, train_acc = execute_training_epoch(
-                network, training_loader, optimizer, criterion, device
+            train_loss, train_acc = run_training_epoch(
+                model, train_loader, optimizer, loss_fn, device
             )
 
             # Validate
-            val_loss, val_acc = assess_model_performance(
-                network, validation_loader, criterion, device
+            val_loss, val_acc = evaluate_model(
+                model, val_loader, loss_fn, device
             )
 
             # Log metrics
